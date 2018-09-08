@@ -1,0 +1,6 @@
+[submodule "Cinnamon"]
+	path = Cinnamon
+	url = https://github.com/AlaskanEmily/Cinnamon.git
+[submodule "fjogg"]
+	path = fjogg
+	url = https://github.com/FlyingJester/fjogg.git

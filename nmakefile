@@ -1,0 +1,18 @@
+# Any copyright is dedicated to the Public Domain.
+# http://creativecommons.org/publicdomain/zero/1.0/
+
+# These flags are for a separate Mercury directory
+FJOGG_DIR=fjogg
+FJOGG_FLAGS=--search-lib-files-dir fjogg --init-file fjogg/fjogg.init --link-object fjogg/libfjogg.lib
+CINNAMON_FLAGS=-L Cinnamon --c-include-dir Cinnamon -l cinnamon
+
+all: build_cinnamon build_fjogg
+	mercury --make audio_player $(FJOGG_FLAGS) $(CINNAMON_FLAGS) -L lib --c-include-dir include -l opus
+	@echo y | xcopy /D Cinnamon\Cinnamon.dll "$(MAKEDIR)" > nul
+
+build_fjogg:
+	@cd $(FJOGG_DIR) && mercury --make libfjogg
+
+build_cinnamon:
+	@cd Cinnamon && $(MAKE) /nologo /f nmakefile dsound
+	@mkdir lib || echo > nul
