@@ -26,8 +26,6 @@
 :- use_module io.
 :- use_module cinnamon.
 
-:- type input == io.binary_input_stream.
-
 % load(Path, Ctx, Sound, !IO)
 :- pred load(string, cinnamon.driver, io.res(cinnamon.sound), io.io, io.io).
 :- mode load(in, in, out, di, uo) is det.
@@ -37,23 +35,25 @@
 %==============================================================================%
 
 :- use_module maybe.
-:- import_module pair.
+:- use_module bitmap.
+:- use_module int.
 :- import_module list.
 
 :- use_module fjogg.
 :- use_module mopus.
-:- use_module buffer.
+
+% shorthand
+:- type io_input == io.binary_input_stream.
 
 % Read in a page.
 % Read out a packet.
-
-:- pred read_page(input, cinnamon.format, list(buffer.buffer),
+:- pred read_page(io_input, cinnamon.format, list(bitmap.bitmap),
     cinnamon.loader, cinnamon.loader,
     mopus.decoder, mopus.decoder, 
     io.io, io.io).
 :- mode read_page(in, in, in, di, uo, di, uo, di, uo) is det.
 
-:- pred read(input, cinnamon.driver, io.res(cinnamon.sound), io.io, io.io).
+:- pred read(io_input, cinnamon.driver, io.res(cinnamon.sound), io.io, io.io).
 :- mode read(in, in, out, di, uo) is det.
 
 load(Path, Drv, Sound, !IO) :-
@@ -71,7 +71,7 @@ read(Input, Drv, Result, !IO) :-
     ( PageResult = io.ok(Page), fjogg.packet_out(Page, _, Size) ->
         mopus.init(Input, Size, MaybeDecoder, !IO),
         (
-            MaybeDecoder = maybe.yes((Decoder - NumChan)),
+            MaybeDecoder = maybe.ok({Decoder, NumChan}),
             ( NumChan = 1 ->
                 Speakers = cinnamon.mono
             ;
@@ -89,15 +89,15 @@ read(Input, Drv, Result, !IO) :-
                 Result = io.error(Err)
             )
         ;
-            MaybeDecoder = maybe.no,
-            Result = io.error(io.make_io_error("Could not initialize Opus"))
+            MaybeDecoder = maybe.error(E),
+            Result = io.error(io.make_io_error(E))
         )
     ;
         Result = io.error(io.make_io_error("Invalid ogg file"))
     ).
 
-:- pred read_from_page(input, cinnamon.format, fjogg.page,
-    list(buffer.buffer), list(buffer.buffer), 
+:- pred read_from_page(io_input, cinnamon.format, fjogg.page,
+    list(bitmap.bitmap), list(bitmap.bitmap), 
     cinnamon.loader, cinnamon.loader,
     mopus.decoder, mopus.decoder, 
     io.io, io.io).
@@ -105,60 +105,78 @@ read(Input, Drv, Result, !IO) :-
 :- mode read_from_page(in, in, in, in, out, di, uo, di, uo, di, uo) is det.
 
 % Shorthand just to allow us to use state variables for the lists.
-:- pred append_list(list(buffer.buffer)::in,
-    list(buffer.buffer)::in, list(buffer.buffer)::out) is det.
+:- pred append_list(list(bitmap.bitmap)::in,
+    list(bitmap.bitmap)::in, list(bitmap.bitmap)::out) is det.
 append_list(End, Start, Out) :- list.append(Start, End, Out).
 
 % LastData is data from a continued packet on the last page, or nothing.
-read_page(Input, Format, LastData, !Loader, !Decoder, !IO) :-
-    fjogg.read_page(Input, PageResult, !IO),
+read_page(Stream, Format, LastData, !Loader, !Decoder, !IO) :-
+    fjogg.read_page(Stream, PageResult, !IO),
     ( PageResult = io.ok(Page) ->
-        read_from_page(Input, Format, Page, LastData, LeftOver, !Loader, !Decoder, !IO),
+        read_from_page(Stream, Format, Page, LastData, LeftOver, !Loader, !Decoder, !IO),
         % The last packet, if incomplete, is left for us to handle here.
-        read_page(Input, Format, LeftOver, !Loader, !Decoder, !IO)
+        read_page(Stream, Format, LeftOver, !Loader, !Decoder, !IO)
     ;
-        true % Pass...TODO: Print error if Input is not empty.
+        true % Pass...TODO: Print error if Stream is not empty.
     ).
 
-read_from_page(Input, Format, PageIn, BufferIn, BufferOut, !Loader, !Decoder, !IO) :-
-    ( fjogg.packet_out(PageIn, PageOut, Size) ->
-        buffer.read(Input, Size, BufferResult, !IO),
+read_from_page(Stream, Format, PageIn, BufferIn, BufferOut, !Loader, !Decoder, !IO) :-
+    ( if
+        fjogg.packet_out(PageIn, PageOut, Size)
+    then
+        InitBitmap = bitmap.init(int.unchecked_left_shift(Size, 3)),
+        io.read_bitmap(Stream, 0, Size, InitBitmap, Bitmap, BytesRead, ReadResult, !IO),
         (
-            BufferResult = io.ok(Buffer),
-            ( fjogg.last_packet(PageOut) ->
-                ( fjogg.packet_crosses_page(PageOut) ->
-                    BufferOut = [Buffer|[]]
-                ;
-                    buffer.concatenate(BufferIn, AllBuffersIn),
-                    buffer.append(AllBuffersIn, Buffer) = DataBuffer,
-                    mopus.decode_16(DataBuffer, PCMBuffer, !Decoder),
-                    cinnamon.put_data(!Loader, PCMBuffer),
-                    BufferOut = []
+            ReadResult = io.ok,
+            ( if
+                BytesRead = Size
+            then
+                ( if
+                    fjogg.last_packet(PageOut)
+                then
+                    ( if
+                        fjogg.packet_crosses_page(PageOut)
+                    then
+                        BufferOut = [Bitmap|[]]
+                    else
+                        list.append(BufferIn, [Bitmap|[]], AllBuffersIn),
+                        bitmap.append_list(AllBuffersIn) = DataBuffer,
+                        mopus.decode_16(DataBuffer, PCMBuffer, !Decoder),
+                        cinnamon.put_data(!Loader, PCMBuffer),
+                        BufferOut = []
+                    )
+                else
+                    list.append(BufferIn, [Bitmap|[]], AllBuffersIn),
+                    bitmap.append_list(AllBuffersIn) = DataBuffer,
+                    Format = cinnamon.format(Type, _),
+                    ( if
+                        Type = cinnamon.signed16
+                    then
+                        mopus.decode_16(DataBuffer, PCMBuffer, !Decoder),
+                        cinnamon.put_data(!Loader, PCMBuffer),
+                        read_from_page(Stream, Format, PageOut, [], BufferOut, !Loader, !Decoder, !IO)
+                    else if
+                        Type = cinnamon.float
+                    then
+                        mopus.decode_float(DataBuffer, PCMBuffer, !Decoder),
+                        cinnamon.put_data(!Loader, PCMBuffer),
+                        read_from_page(Stream, Format, PageOut, [], BufferOut, !Loader, !Decoder, !IO)
+                    else
+                        io.write_string("Invalid format\n", !IO),
+                        BufferOut = []
+                    )
                 )
-            ;
-                buffer.concatenate(BufferIn, AllBuffersIn),
-                buffer.append(AllBuffersIn, Buffer, DataBuffer),
-                Format = cinnamon.format(Type, _),
-                ( Type = cinnamon.signed16 ->
-                    mopus.decode_16(DataBuffer, PCMBuffer, !Decoder),
-                    cinnamon.put_data(!Loader, PCMBuffer),
-                    read_from_page(Input, Format, PageOut, [], BufferOut, !Loader, !Decoder, !IO)
-                ; Type = cinnamon.float ->
-                    mopus.decode_float(DataBuffer, PCMBuffer, !Decoder),
-                    cinnamon.put_data(!Loader, PCMBuffer),
-                    read_from_page(Input, Format, PageOut, [], BufferOut, !Loader, !Decoder, !IO)
-                ;
-                    io.write_string("Invalid format\n", !IO),
-                    BufferOut = []
-                )
+            else
+                io.write_string("Unexpected EOF\n", !IO),
+                BufferOut = []
             )
         ;
-            BufferResult = io.error(_, Err),
+            ReadResult = io.error(Err),
             io.write_string("Error reading buffer ", !IO),
             io.write_string(io.error_message(Err), !IO),
             io.nl(!IO),
             BufferOut = []
         )
-    ;
+    else
         BufferOut = []
     ).

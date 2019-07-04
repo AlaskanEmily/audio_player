@@ -25,7 +25,7 @@
 %==============================================================================%
 
 :- use_module io.
-:- use_module buffer.
+:- use_module bitmap.
 
 :- type driver.
 :- type loader.
@@ -56,7 +56,7 @@
 :- pred create_loader(sample_type, speaker_config, int, driver, io.res(loader)).
 :- mode create_loader(in, in, in, in, uo) is det.
 
-:- pred put_data(loader::di, loader::uo, buffer.buffer::in) is det.
+:- pred put_data(loader::di, loader::uo, bitmap.bitmap::bitmap.bitmap_ui) is det.
 
 :- pred finalize(loader::di, sound::uo) is det.
 
@@ -75,7 +75,7 @@
     #include ""cin_loader.h""
     ").
 
-:- pragma foreign_import_module("C", buffer).
+:- pragma foreign_import_module("C", bitmap).
 
 :- pragma foreign_type("C", driver, "struct Cin_Driver*").
 :- pragma foreign_type("C", loader, "struct Cin_Loader*").
@@ -135,10 +135,12 @@ create_loader_ok(Ld) = io.ok(Ld).
 :- pragma foreign_proc("C", open_driver(Out::uo, IO0::di, IO1::uo),
     [will_not_throw_exception, promise_pure, thread_safe, tabled_for_io],
     "
+        IO1 = IO0;
         struct Cin_Driver *const driver =
-            MR_GC_malloc_atomic(Cin_StructDriverSize());
+            MR_GC_malloc(Cin_StructDriverSize());
         const enum Cin_DriverError err = Cin_CreateDriver(driver);
         if(err != Cin_eDriverSuccess){
+            MR_GC_free(driver);
             Out = MCin_CreateDriverError(""Cinnamon: Error creating driver"");
         }
         else{
@@ -164,29 +166,34 @@ create_loader(format(Type, Speakers), Rate, Driver, Out) :-
                 break;
             case Cin_eLoaderUnsupportedFormat:
                 Out = MCin_CreateLoaderError(""Cinnamon: Unsupported format"");
+                MR_GC_free(loader);
                 break;
             case Cin_eLoaderInvalidFormat:
                 Out = MCin_CreateLoaderError(""Cinnamon: Invalid format"");
+                MR_GC_free(loader);
                 break;
             case Cin_eLoaderUnsupportedNumChannels:
                 Out = MCin_CreateLoaderError(""Cinnamon: Unsupported number of channels"");
+                MR_GC_free(loader);
                 break;
             case Cin_eLoaderUnsupportedSampleRate:
                 Out = MCin_CreateLoaderError(""Cinnamon: Unsupported sample rate"");
+                MR_GC_free(loader);
                 break;
             case Cin_eLoaderFailure:
             default:
                 Out = MCin_CreateLoaderError(""Cinnamon: Error creating loader"");
+                MR_GC_free(loader);
                 break;
         }
     ").
 
-:- pragma foreign_proc("C", put_data(In::di, Out::uo, Buffer::in),
+:- pragma foreign_proc("C", put_data(In::di, Out::uo, BMP::bitmap.bitmap_ui),
     [does_not_affect_liveness, will_not_call_mercury,
     will_not_throw_exception, promise_pure, thread_safe, tabled_for_io],
     "
         Out = In;
-        Cin_LoaderPut((Out = In), Buffer->data, Buffer->size);
+        Cin_LoaderPut((Out = In), BMP->elements, BMP->num_bits >> 3);
     ").
 
 :- pragma foreign_proc("C", finalize(Loader::di, Sound::uo),
