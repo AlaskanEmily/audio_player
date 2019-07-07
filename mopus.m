@@ -97,15 +97,6 @@
 
 :- pragma foreign_type("C", decoder, "struct MOpus_Decoder *").
 
-:- pragma foreign_decl("C", "void MOpus_DecoderFinalizer(void *ptr, void *data);").
-:- pragma foreign_code("C",
-    "
-    void MOpus_DecoderFinalizer(void *ptr, void *data){
-        struct MOpus_Decoder *decoder = (struct MOpus_Decoder*)ptr;
-        opus_decoder_destroy(decoder->dec);
-    }
-    ").
-
 :- pragma foreign_code("C",
     "
     const char *MOpus_NameError(int err){
@@ -226,7 +217,6 @@ init(Stream, Len, MaybeDecoder, !IO) :-
                     else{
                         SUCCESS_INDICATOR = 1;
                         NChan = nchan;
-                        MR_GC_register_finalizer(Out, MOpus_DecoderFinalizer, NULL);
                     }
                 }
             }
